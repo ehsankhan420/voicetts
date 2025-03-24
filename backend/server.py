@@ -6,41 +6,15 @@ import io
 import torch
 import websockets
 from groq import Groq
-from faster_whisper import WhisperModel
 from TTS.api import TTS
 
 # Configuration
 WEBSOCKET_PORT = 8000
 WEBSOCKET_HOST = "0.0.0.0"  # Listen on all interfaces
-GROQ_API_KEY = "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"  # Replace with your actual API key
+GROQ_API_KEY = "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"  # Replace with your actual API key
 
-# Initialize Groq client - Fixed initialization without proxies
-try:
-    # Try the simple initialization first
-    groq_client = Groq(api_key=GROQ_API_KEY)
-except TypeError:
-    # If that fails, try with specific parameters
-    import httpx
-    groq_client = Groq(
-        api_key=GROQ_API_KEY,
-        http_client=httpx.Client(
-            base_url="https://api.groq.com",
-            timeout=60.0,
-            follow_redirects=True
-        )
-    )
-
-# Initialize Whisper model
-print("Initializing Whisper model...")
-num_cores = os.cpu_count()
-whisper_model = WhisperModel(
-    "base",
-    device="cpu",
-    compute_type="int8",
-    cpu_threads=num_cores // 2 if num_cores else 2,
-    num_workers=num_cores // 2 if num_cores else 2
-)
-print("Whisper model initialized.")
+# Initialize Groq client
+groq_client = Groq(api_key=GROQ_API_KEY)
 
 # Initialize TTS model
 print("Initializing TTS model...")
@@ -116,10 +90,16 @@ async def process_audio(audio_data, websocket):
         with open(temp_audio_path, "wb") as f:
             f.write(audio_bytes)
         
-        print(f"Transcribing audio for client {client_id}...")
-        # Transcribe audio using Whisper
-        segments, _ = whisper_model.transcribe(temp_audio_path)
-        transcribed_text = ''.join(segment.text for segment in segments)
+        print(f"Transcribing audio for client {client_id} using Groq Whisper API...")
+        
+        # Transcribe audio using Groq Whisper API
+        with open(temp_audio_path, "rb") as file:
+            transcription = groq_client.audio.transcriptions.create(
+                file=(temp_audio_path, file.read()),
+                model="whisper-large-v3-turbo",
+                response_format="verbose_json",
+            )
+            transcribed_text = transcription.text
         
         # Clean up temporary file
         if os.path.exists(temp_audio_path):
@@ -176,10 +156,16 @@ async def process_audio(audio_data, websocket):
         messages.extend(conversation_history)
         
         print(f"Getting response from Groq using {script_type} script...")
-        # Get response from Groq
+        
+        # Get response from Groq using Llama model
         chat_completion = groq_client.chat.completions.create(
             messages=messages,
-            model='llama3-70b-8192'
+            model="llama-3.3-70b-versatile",
+            temperature=1,
+            max_completion_tokens=1024,
+            top_p=1,
+            stream=False,
+            stop=None
         )
         
         response_text = chat_completion.choices[0].message.content
@@ -202,7 +188,7 @@ async def process_audio(audio_data, websocket):
         }))
         
         print("Generating speech from response...")
-        # Generate speech from response
+        # Generate speech from response using the original TTS implementation
         temp_output_path = f"temp_output_{client_id}.wav"
         
         # Ensure the response is long enough to avoid the kernel size error
@@ -350,4 +336,3 @@ if __name__ == "__main__":
         print("Server stopped by user")
     except Exception as e:
         print(f"Server error: {str(e)}")
-
