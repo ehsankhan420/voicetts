@@ -19,7 +19,7 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 # Initialize TTS model
 print("Initializing TTS model...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-tts_model = TTS(model_name='tts_models/en/ljspeech/tacotron2-DDC').to(device)
+tts_model = TTS(model_name='tts_models/multilingual/multi-dataset/xtts_v2').to(device)
 print(f"TTS model initialized on {device}.")
 
 # Define BPO scripts as system prompts
