@@ -16,19 +16,25 @@ export default function VoiceAssistant() {
   const [isConnected, setIsConnected] = useState(false)
   const [isListening, setIsListening] = useState(false)
   const [scriptType, setScriptType] = useState("reliant_bpo")
-  // Add these new state variables after the existing state declarations
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [silenceTimer, setSilenceTimer] = useState<NodeJS.Timeout | null>(null)
   const [processingAudio, setProcessingAudio] = useState(false)
-  const silenceThreshold = useRef(0.015) // Adjust based on testing
+  
+  // Increase the default silence threshold to make detection more reliable
+  const silenceThreshold = useRef(0.015)
+  // Keep track of consecutive silence frames
+  const silenceFramesRef = useRef(0)
+  // Number of consecutive frames to trigger silence
+  const silenceFrameThreshold = useRef(10)
+  
   const audioAnalyserRef = useRef<AnalyserNode | null>(null)
   const audioStreamRef = useRef<MediaStream | null>(null)
-
   const socketRef = useRef<WebSocket | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
+  const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   // Add an environment variable notice at the top of the component
   useEffect(() => {
@@ -45,8 +51,7 @@ export default function VoiceAssistant() {
       // When audio playback starts (response is playing), stop listening
       audioElementRef.current.onplay = () => {
         if (isListening && mediaRecorderRef.current) {
-          mediaRecorderRef.current.stop()
-          setIsListening(false)
+          stopRecording()
         }
       }
 
@@ -66,6 +71,9 @@ export default function VoiceAssistant() {
       if (silenceTimer) {
         clearTimeout(silenceTimer)
       }
+      if (recordingIntervalRef.current) {
+        clearInterval(recordingIntervalRef.current)
+      }
 
       // Clean up audio stream
       if (audioStreamRef.current) {
@@ -77,7 +85,7 @@ export default function VoiceAssistant() {
   // Add this useEffect to start/stop audio monitoring based on call state
   useEffect(() => {
     if (isCallActive) {
-      monitorAudioLevel()
+      requestAnimationFrame(monitorAudioLevel)
     }
 
     return () => {
@@ -157,11 +165,15 @@ export default function VoiceAssistant() {
                 content: `Error: ${data.message}. Please try again.`,
               },
             ])
+            setProcessingAudio(false)
+            resumeListening()
           } else if (data.type === "info") {
             console.log("Server info:", data.message)
           }
         } catch (error) {
           console.error("Error parsing WebSocket message:", error)
+          setProcessingAudio(false)
+          resumeListening()
         }
       }
 
@@ -209,8 +221,97 @@ export default function VoiceAssistant() {
     }
   }
 
+  // Monitor audio levels
+  const monitorAudioLevel = () => {
+    if (!audioAnalyserRef.current || !isCallActive) return
+    
+    const dataArray = new Uint8Array(audioAnalyserRef.current.frequencyBinCount)
+    audioAnalyserRef.current.getByteFrequencyData(dataArray)
+
+    // Calculate average volume level
+    const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length / 255
+    
+    // Detect if user is speaking
+    const userIsSpeaking = average > silenceThreshold.current
+
+    if (userIsSpeaking) {
+      // Reset silence counter when user is speaking
+      silenceFramesRef.current = 0
+      
+      // If we weren't already in speaking state and not processing or muted
+      if (!isSpeaking && !processingAudio && !isMuted && isCallActive) {
+        console.log("User started speaking", average)
+        setIsSpeaking(true)
+        
+        // Clear any existing silence timer
+        if (silenceTimer) {
+          clearTimeout(silenceTimer)
+          setSilenceTimer(null)
+        }
+        
+        // Make sure we're recording
+        if (!isListening) {
+          startRecording()
+        }
+      }
+    } else {
+      // User is not speaking, increment silence counter
+      silenceFramesRef.current++
+      
+      // If we've reached the silence threshold and user was speaking
+      if (silenceFramesRef.current >= silenceFrameThreshold.current && isSpeaking && !processingAudio && !isMuted) {
+        console.log("User stopped speaking", average, "silence frames:", silenceFramesRef.current)
+        setIsSpeaking(false)
+        
+        // Stop recording to process the audio after a short delay
+        if (!silenceTimer) {
+          const timer = setTimeout(() => {
+            // Only process if we're still in silence
+            if (silenceFramesRef.current >= silenceFrameThreshold.current && isListening && !processingAudio) {
+              console.log("Processing due to silence")
+              stopRecording()
+              
+              // Reset the silence counter after processing
+              silenceFramesRef.current = 0
+            }
+            setSilenceTimer(null)
+          }, 800) // Increased delay to confirm silence (from 500ms to 800ms for more reliability)
+          
+          setSilenceTimer(timer)
+        }
+      }
+    }
+
+    // Continue monitoring if call is active
+    if (isCallActive) {
+      requestAnimationFrame(monitorAudioLevel)
+    }
+  }
+
+  // Function to stop recording and process audio
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      console.log("Stopping recording")
+      mediaRecorderRef.current.stop()
+      setIsListening(false)
+      
+      // Set speaking state to false when stopping recording
+      setIsSpeaking(false)
+      silenceFramesRef.current = 0
+    }
+  }
+
+  // Function to start recording
+  const startRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "recording" && !processingAudio) {
+      console.log("Starting recording")
+      audioChunksRef.current = []
+      mediaRecorderRef.current.start(1000)
+      setIsListening(true)
+    }
+  }
+
   // Start call
-  // Replace the startCall function with this enhanced version
   const startCall = async () => {
     try {
       // Clear previous messages
@@ -234,9 +335,6 @@ export default function VoiceAssistant() {
 
         const source = audioContextRef.current.createMediaStreamSource(stream)
         source.connect(analyser)
-
-        // Start monitoring audio levels
-        monitorAudioLevel()
       }
 
       // Create media recorder
@@ -251,6 +349,7 @@ export default function VoiceAssistant() {
       }
 
       mediaRecorder.onstop = async () => {
+        // Only process audio if we have data, connection is open, and not muted
         if (
           audioChunksRef.current.length > 0 &&
           socketRef.current &&
@@ -258,13 +357,13 @@ export default function VoiceAssistant() {
           !isMuted
         ) {
           const audioBlob = new Blob(audioChunksRef.current, { type: "audio/wav" })
-          audioChunksRef.current = []
 
           try {
             // Only process if we have meaningful audio and we're not already processing
             if (audioBlob.size > 1000 && !processingAudio) {
+              console.log("Processing audio", audioBlob.size)
               setProcessingAudio(true)
-
+              
               // Convert blob to base64
               const base64Audio = await blobToBase64(audioBlob)
 
@@ -275,18 +374,37 @@ export default function VoiceAssistant() {
                   data: base64Audio,
                 }),
               )
+              
+              // Clear audio chunks after sending
+              audioChunksRef.current = []
+            } else if (!processingAudio) {
+              // If there's not enough audio data to process, resume listening
+              console.log("Not enough audio to process, resuming listening")
+              audioChunksRef.current = []
+              resumeListening()
             }
           } catch (error) {
             console.error("Error sending audio:", error)
             setProcessingAudio(false)
+            audioChunksRef.current = []
+            resumeListening()
+          }
+        } else {
+          // Clear audio chunks if we're not processing them
+          audioChunksRef.current = []
+          if (!processingAudio && !isMuted) {
+            resumeListening()
           }
         }
       }
 
       // Start recording
-      mediaRecorder.start(1000) // Collect data in 1-second chunks
+      startRecording()
       setIsCallActive(true)
-      setIsListening(true)
+      
+      // Start monitoring audio levels
+      requestAnimationFrame(monitorAudioLevel)
+      
     } catch (error: unknown) {
       console.error("Error starting call:", error)
       const errorMessage = error instanceof Error ? error.message : "Unknown error"
@@ -300,59 +418,6 @@ export default function VoiceAssistant() {
     }
   }
 
-  // Add this new function for monitoring audio levels
-  const monitorAudioLevel = () => {
-    if (!audioAnalyserRef.current || !isCallActive) return
-
-    const dataArray = new Uint8Array(audioAnalyserRef.current.frequencyBinCount)
-    audioAnalyserRef.current.getByteFrequencyData(dataArray)
-
-    // Calculate average volume level
-    const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length / 255
-
-    // Detect if user is speaking
-    const userIsSpeaking = average > silenceThreshold.current
-
-    if (userIsSpeaking && !isSpeaking && !isMuted) {
-      // User started speaking
-      setIsSpeaking(true)
-
-      // Clear any existing silence timer
-      if (silenceTimer) {
-        clearTimeout(silenceTimer)
-        setSilenceTimer(null)
-      }
-
-      // If we were processing audio and user starts speaking, interrupt
-      if (processingAudio && mediaRecorderRef.current) {
-        setProcessingAudio(false)
-        // Restart recording to capture new speech
-        if (mediaRecorderRef.current.state !== "recording") {
-          mediaRecorderRef.current.start(1000)
-          setIsListening(true)
-        }
-      }
-    } else if (!userIsSpeaking && isSpeaking && !isMuted) {
-      // User might have stopped speaking - start silence timer
-      if (!silenceTimer) {
-        const timer = setTimeout(() => {
-          // User has been silent for the threshold period
-          setIsSpeaking(false)
-
-          // Stop recording to process the audio
-          if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-            mediaRecorderRef.current.stop()
-          }
-        }, 1500) // 1.5 seconds of silence before processing
-
-        setSilenceTimer(timer)
-      }
-    }
-
-    // Continue monitoring
-    requestAnimationFrame(monitorAudioLevel)
-  }
-
   // End call
   const endCall = () => {
     if (mediaRecorderRef.current) {
@@ -362,22 +427,34 @@ export default function VoiceAssistant() {
     if (socketRef.current) {
       socketRef.current.close()
     }
+    
+    if (silenceTimer) {
+      clearTimeout(silenceTimer)
+      setSilenceTimer(null)
+    }
+    
+    if (recordingIntervalRef.current) {
+      clearInterval(recordingIntervalRef.current)
+      recordingIntervalRef.current = null
+    }
 
+    silenceFramesRef.current = 0
+    setIsSpeaking(false)
     setIsCallActive(false)
     setIsListening(false)
+    setProcessingAudio(false)
   }
 
   // Toggle mute
-  // Replace the toggleMute function with this enhanced version
   const toggleMute = () => {
     setIsMuted(!isMuted)
 
     if (mediaRecorderRef.current) {
       if (!isMuted) {
         // Muting - stop recording
-        mediaRecorderRef.current.stop()
-        setIsListening(false)
+        stopRecording()
         setIsSpeaking(false)
+        silenceFramesRef.current = 0
 
         // Clear any silence timer
         if (silenceTimer) {
@@ -386,10 +463,7 @@ export default function VoiceAssistant() {
         }
       } else {
         // Unmuting - start recording again
-        if (mediaRecorderRef.current.state !== "recording") {
-          mediaRecorderRef.current.start(1000)
-          setIsListening(true)
-        }
+        resumeListening()
       }
     }
   }
@@ -430,20 +504,17 @@ export default function VoiceAssistant() {
   }
 
   // Play audio
-  // Replace the playAudio function with this enhanced version
   const playAudio = (audioBlob: Blob) => {
     const url = URL.createObjectURL(audioBlob)
     if (audioElementRef.current) {
       // Stop listening while response is playing
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-        mediaRecorderRef.current.stop()
-        setIsListening(false)
-      }
+      stopRecording()
 
       audioElementRef.current.src = url
       audioElementRef.current.play().catch((error) => {
         console.error("Error playing audio:", error)
         // If playback fails, resume listening
+        setProcessingAudio(false)
         resumeListening()
       })
 
@@ -452,11 +523,11 @@ export default function VoiceAssistant() {
     }
   }
 
-  // Add this new function to resume listening
+  // Resume listening
   const resumeListening = () => {
-    if (isCallActive && !isMuted && mediaRecorderRef.current && mediaRecorderRef.current.state !== "recording") {
-      mediaRecorderRef.current.start(1000)
-      setIsListening(true)
+    if (isCallActive && !isMuted && !processingAudio) {
+      startRecording()
+      requestAnimationFrame(monitorAudioLevel)
     }
   }
 
@@ -623,4 +694,3 @@ export default function VoiceAssistant() {
     </div>
   )
 }
-
