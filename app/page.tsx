@@ -107,10 +107,9 @@ export default function VoiceAssistant() {
   const connectWebSocket = () => {
     // Use environment variable or fallback to localhost
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 
-               (window.location.protocol === "https:" ? "wss://localhost:8000/ws" : "ws://localhost:8000/ws");
+               (window.location.protocol === "https:" ? "wss://92.43.29.98:26884/ws" : "ws://92.43.29.98:26884/ws");
 
 console.warn(`⚠️ Warning: Using WebSocket URL: ${WS_URL}`);
-
 
     try {
       const socket = new WebSocket(wsUrl)
