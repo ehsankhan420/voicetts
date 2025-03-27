@@ -83,6 +83,7 @@ export default function VoiceAssistant() {
       }
 
       audioElementRef.current.onended = () => {
+        setIsSpeaking(false) // Reset speaking state when audio ends
         resumeListening()
       }
     }
@@ -106,6 +107,7 @@ export default function VoiceAssistant() {
   useEffect(() => {
     if (audioElementRef.current) {
       audioElementRef.current.onended = () => {
+        setIsSpeaking(false) // Reset speaking state when audio ends
         resumeListening()
       }
     }
@@ -116,6 +118,19 @@ export default function VoiceAssistant() {
       }
     }
   }, [isCallActive, isMuted])
+
+  // Add this function to send periodic pings to keep the connection alive
+  const setupPingInterval = (socket: WebSocket) => {
+    const pingInterval = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "ping" }))
+      } else {
+        clearInterval(pingInterval)
+      }
+    }, 30000) // Send a ping every 30 seconds
+
+    return pingInterval
+  }
 
   const connectWebSocket = () => {
     const wsUrl =
@@ -132,6 +147,14 @@ export default function VoiceAssistant() {
       socket.onopen = () => {
         console.log("WebSocket connected")
         setIsConnected(true)
+
+        // Setup ping interval
+        const pingInterval = setupPingInterval(socket)
+
+        // Clear the interval when the socket closes
+        socket.addEventListener("close", () => {
+          clearInterval(pingInterval)
+        })
 
         if (context.trim()) {
           socket.send(
@@ -180,17 +203,26 @@ export default function VoiceAssistant() {
 
       socket.onclose = (event) => {
         console.log(`WebSocket disconnected: ${event.code} ${event.reason}`)
-        setIsConnected(false)
-        setIsCallActive(false)
 
-        if (isCallActive) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              content: "Connection lost. Please try starting the call again.",
-            },
-          ])
+        // Only update connection state if this wasn't a normal closure or if the call is still active
+        if (event.code !== 1000 || isCallActive) {
+          setIsConnected(false)
+
+          // Only end the call if it was an abnormal closure
+          if (event.code !== 1000) {
+            setIsCallActive(false)
+
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: "Connection lost. Please try starting the call again.",
+              },
+            ])
+          } else if (isCallActive) {
+            // If it was a normal closure but the call is still active, try to reconnect
+            setTimeout(connectWebSocket, 1000)
+          }
         }
       }
 
@@ -482,9 +514,11 @@ export default function VoiceAssistant() {
         setIsListening(false)
       }
 
+      setIsSpeaking(true) // Set speaking state to true when playing audio
       audioElementRef.current.src = url
       audioElementRef.current.play().catch((error) => {
         console.error("Error playing audio:", error)
+        setIsSpeaking(false) // Reset speaking state on error
         resumeListening()
       })
 
@@ -493,9 +527,33 @@ export default function VoiceAssistant() {
   }
 
   const resumeListening = () => {
-    if (isCallActive && !isMuted && mediaRecorderRef.current && mediaRecorderRef.current.state !== "recording") {
+    if (!isCallActive || isMuted) return
+
+    // Ensure we're not already listening
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "recording") {
       mediaRecorderRef.current.start(1000)
       setIsListening(true)
+    }
+
+    // Restart speech recognition if it's not already running
+    if (recognitionRef.current) {
+      try {
+        // First stop it to reset any potential error state
+        recognitionRef.current.stop()
+      } catch (e) {
+        // Ignore errors when stopping - it might not be running
+      }
+
+      try {
+        // Then start it again
+        setTimeout(() => {
+          if (recognitionRef.current && isCallActive && !isMuted) {
+            recognitionRef.current.start()
+          }
+        }, 100) // Small delay to ensure stop completes
+      } catch (e) {
+        console.error("Error restarting speech recognition:", e)
+      }
     }
   }
 
