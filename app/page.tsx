@@ -51,6 +51,7 @@ interface SpeechRecognition extends EventTarget {
   maxAlternatives: number;
   onerror: (event: SpeechRecognitionErrorEvent) => void;
   onresult: (event: SpeechRecognitionEvent) => void;
+  onend: () => void;
   start: () => void;
   stop: () => void;
   abort: () => void;
@@ -359,6 +360,7 @@ export default function VoiceAssistant() {
       if (recognitionRef.current) {
         recognitionRef.current.continuous = true
         recognitionRef.current.interimResults = true
+        recognitionRef.current.lang = "en-US"
 
         recognitionRef.current.onresult = (event: SpeechRecognitionEvent) => {
           if (isMuted || isSpeaking) return
@@ -383,18 +385,35 @@ export default function VoiceAssistant() {
             clearTimeout(silenceTimer)
           }
 
-          const timer = setTimeout(() => {
-            if (transcript.trim() && Date.now() - lastSpeechRef.current >= 1500 && !isMuted && !isSpeaking) {
-              stopRecognition()
-              processAudio()
-            }
-          }, 1500)
-
-          setSilenceTimer(timer)
+          // Only process audio if we have final results
+          if (finalTranscript.trim()) {
+            const timer = setTimeout(() => {
+              if (Date.now() - lastSpeechRef.current >= 1500 && !isMuted && !isSpeaking) {
+                stopRecognition()
+                processAudio()
+              }
+            }, 1500)
+            setSilenceTimer(timer)
+          }
         }
 
-        recognitionRef.current.onerror = (event) => {
-          console.error("Speech recognition error:", event)
+        recognitionRef.current.onend = () => {
+          // Automatically restart recognition unless we explicitly stopped it
+          if (isCallActive && !isMuted && !isSpeaking) {
+            setTimeout(() => {
+              if (recognitionRef.current) {
+                try {
+                  recognitionRef.current.start()
+                } catch (e) {
+                  console.error("Failed to restart speech recognition:", e)
+                }
+              }
+            }, 100)
+          }
+        }
+
+        recognitionRef.current.onerror = (event: SpeechRecognitionErrorEvent) => {
+          console.error("Speech recognition error:", event.error)
           // Attempt to restart recognition
           setTimeout(() => {
             if (recognitionRef.current && isCallActive && !isMuted) {
