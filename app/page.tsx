@@ -16,32 +16,19 @@ export default function VoiceAssistant() {
   const [isConnected, setIsConnected] = useState(false)
   const [isListening, setIsListening] = useState(false)
   const [scriptType, setScriptType] = useState("reliant_bpo")
+  // Add these new state variables after the existing state declarations
   const [isSpeaking, setIsSpeaking] = useState(false)
+  const [silenceTimer, setSilenceTimer] = useState<NodeJS.Timeout | null>(null)
   const [processingAudio, setProcessingAudio] = useState(false)
-  const [listeningDuration, setListeningDuration] = useState(0)
-
-  // Browser VAD related refs and state
-  const lastSpeechRef = useRef<number>(Date.now())
-  const silenceTimer = useRef<NodeJS.Timeout | null>(null)
-  const listeningTimerRef = useRef<NodeJS.Timeout | null>(null)
-  const audioContextRef = useRef<AudioContext | null>(null)
+  const silenceThreshold = useRef(0.015) // Adjust based on testing
   const audioAnalyserRef = useRef<AnalyserNode | null>(null)
   const audioStreamRef = useRef<MediaStream | null>(null)
+
+  const socketRef = useRef<WebSocket | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
-  const socketRef = useRef<WebSocket | null>(null)
-  const animationFrameRef = useRef<number | null>(null)
-  const restartTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-
-  // VAD configuration
-  const silenceThreshold = useRef(0.015)
-  const silenceDuration = useRef(1500) // ms before considering speech ended
-  const minSpeechFrames = useRef(3) // min frames to consider as speech
-  const consecutiveSilenceFramesRef = useRef(0)
-  const consecutiveSpeechFramesRef = useRef(0)
-  const vadProcessingRef = useRef(false)
-  const vadBufferRef = useRef<number[]>([])
 
   // Add an environment variable notice at the top of the component
   useEffect(() => {
@@ -57,22 +44,14 @@ export default function VoiceAssistant() {
     if (audioElementRef.current) {
       // When audio playback starts (response is playing), stop listening
       audioElementRef.current.onplay = () => {
-        setIsSpeaking(true)
-        if (isListening) {
-          stopRecording()
+        if (isListening && mediaRecorderRef.current) {
+          mediaRecorderRef.current.stop()
+          setIsListening(false)
         }
       }
 
       // When audio playback ends (response is complete), start listening again if not muted
       audioElementRef.current.onended = () => {
-        setIsSpeaking(false)
-        resumeListening()
-      }
-
-      // Handle errors
-      audioElementRef.current.onerror = (e) => {
-        console.error("Audio playback error:", e)
-        setIsSpeaking(false)
         resumeListening()
       }
     }
@@ -84,17 +63,8 @@ export default function VoiceAssistant() {
       if (audioContextRef.current) {
         audioContextRef.current.close()
       }
-      if (silenceTimer.current) {
-        clearTimeout(silenceTimer.current)
-      }
-      if (listeningTimerRef.current) {
-        clearInterval(listeningTimerRef.current)
-      }
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current)
-      }
-      if (restartTimeoutRef.current) {
-        clearTimeout(restartTimeoutRef.current)
+      if (silenceTimer) {
+        clearTimeout(silenceTimer)
       }
 
       // Clean up audio stream
@@ -104,33 +74,34 @@ export default function VoiceAssistant() {
     }
   }, [])
 
-  // Start/stop audio monitoring based on call state
+  // Add this useEffect to start/stop audio monitoring based on call state
   useEffect(() => {
     if (isCallActive) {
-      // Start listening duration timer
-      if (listeningTimerRef.current) {
-        clearInterval(listeningTimerRef.current)
-      }
-
-      listeningTimerRef.current = setInterval(() => {
-        if (isListening && !isSpeaking && !isMuted) {
-          setListeningDuration((prev) => prev + 1)
-        }
-      }, 1000)
+      monitorAudioLevel()
     }
 
     return () => {
-      if (silenceTimer.current) {
-        clearTimeout(silenceTimer.current)
-        silenceTimer.current = null
-      }
-
-      if (listeningTimerRef.current) {
-        clearInterval(listeningTimerRef.current)
-        listeningTimerRef.current = null
+      if (silenceTimer) {
+        clearTimeout(silenceTimer)
+        setSilenceTimer(null)
       }
     }
-  }, [isCallActive, isListening, isSpeaking, isMuted])
+  }, [isCallActive])
+
+  // Add this useEffect to handle dependencies for the resumeListening function
+  useEffect(() => {
+    if (audioElementRef.current) {
+      audioElementRef.current.onended = () => {
+        resumeListening()
+      }
+    }
+
+    return () => {
+      if (audioElementRef.current) {
+        audioElementRef.current.onended = null
+      }
+    }
+  }, [isCallActive, isMuted])
 
   // Connect to WebSocket server
   const connectWebSocket = () => {
@@ -141,8 +112,8 @@ const wsUrl =
       ? "wss://purely-prepared-pigeon.ngrok-free.app"
       : "ws://purely-prepared-pigeon.ngrok-free.app");
 
+  console.warn(`⚠️ Warning: Using WebSocket URL: ${wsUrl}`);
 
-    console.warn(`⚠️ Warning: Using WebSocket URL: ${wsUrl}`)
 
     try {
       const socket = new WebSocket(wsUrl)
@@ -195,15 +166,6 @@ const wsUrl =
             ])
           } else if (data.type === "info") {
             console.log("Server info:", data.message)
-          } else if (data.type === "vad_settings") {
-            // Handle VAD settings from server
-            console.log("Received VAD settings from server:", data.settings)
-            if (data.settings.threshold) {
-              silenceThreshold.current = data.settings.threshold
-            }
-            if (data.settings.min_silence_ms) {
-              silenceDuration.current = data.settings.min_silence_ms
-            }
           }
         } catch (error) {
           console.error("Error parsing WebSocket message:", error)
@@ -255,11 +217,11 @@ const wsUrl =
   }
 
   // Start call
+  // Replace the startCall function with this enhanced version
   const startCall = async () => {
     try {
       // Clear previous messages
       setMessages([])
-      setListeningDuration(0)
 
       // Connect to WebSocket
       connectWebSocket()
@@ -274,22 +236,14 @@ const wsUrl =
       // Set up audio analysis for silence detection
       if (audioContextRef.current) {
         const analyser = audioContextRef.current.createAnalyser()
-        analyser.fftSize = 1024 // Increased for better frequency resolution
-        analyser.smoothingTimeConstant = 0.5 // Add smoothing for more stable readings
+        analyser.fftSize = 256
         audioAnalyserRef.current = analyser
 
         const source = audioContextRef.current.createMediaStreamSource(stream)
         source.connect(analyser)
 
-        // Reset VAD state
-        vadBufferRef.current = []
-        consecutiveSilenceFramesRef.current = 0
-        consecutiveSpeechFramesRef.current = 0
-        vadProcessingRef.current = false
-        lastSpeechRef.current = Date.now()
-
         // Start monitoring audio levels
-        startAudioMonitoring()
+        monitorAudioLevel()
       }
 
       // Create media recorder
@@ -332,7 +286,6 @@ const wsUrl =
           } catch (error) {
             console.error("Error sending audio:", error)
             setProcessingAudio(false)
-            resumeListening()
           }
         }
       }
@@ -354,165 +307,96 @@ const wsUrl =
     }
   }
 
-  // Browser-based VAD monitoring function
-  const startAudioMonitoring = () => {
+  // Add this new function for monitoring audio levels
+  const monitorAudioLevel = () => {
     if (!audioAnalyserRef.current || !isCallActive) return
 
-    const monitorAudioLevel = () => {
-      if (!audioAnalyserRef.current || !isCallActive) return
+    const dataArray = new Uint8Array(audioAnalyserRef.current.frequencyBinCount)
+    audioAnalyserRef.current.getByteFrequencyData(dataArray)
 
-      // Skip processing if muted or AI is speaking
-      if (isMuted || isSpeaking || processingAudio) {
-        animationFrameRef.current = requestAnimationFrame(monitorAudioLevel)
-        return
+    // Calculate average volume level
+    const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length / 255
+
+    // Detect if user is speaking
+    const userIsSpeaking = average > silenceThreshold.current
+
+    if (userIsSpeaking && !isSpeaking && !isMuted) {
+      // User started speaking
+      setIsSpeaking(true)
+
+      // Clear any existing silence timer
+      if (silenceTimer) {
+        clearTimeout(silenceTimer)
+        setSilenceTimer(null)
       }
 
-      const dataArray = new Uint8Array(audioAnalyserRef.current.frequencyBinCount)
-      audioAnalyserRef.current.getByteFrequencyData(dataArray)
-
-      // Calculate average volume level
-      const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length / 255
-
-      // Add to VAD buffer (keep last 10 frames for analysis)
-      vadBufferRef.current.push(average)
-      if (vadBufferRef.current.length > 10) {
-        vadBufferRef.current.shift()
-      }
-
-      // Calculate moving average for more stable detection
-      const movingAverage = vadBufferRef.current.reduce((sum, value) => sum + value, 0) / vadBufferRef.current.length
-
-      // Dynamic threshold adjustment based on background noise
-      const dynamicThreshold = Math.max(
-        silenceThreshold.current,
-        vadBufferRef.current.length >= 5 ? Math.min(...vadBufferRef.current.slice(0, 5)) * 2 : silenceThreshold.current,
-      )
-
-      // Detect if user is speaking using the moving average
-      const userIsSpeaking = movingAverage > dynamicThreshold
-
-      if (userIsSpeaking) {
-        // User is speaking
-        lastSpeechRef.current = Date.now()
-        consecutiveSilenceFramesRef.current = 0
-        consecutiveSpeechFramesRef.current++
-
-        if (consecutiveSpeechFramesRef.current >= minSpeechFrames.current && !isSpeaking) {
-          // User started speaking (with confirmation to avoid false positives)
-          setIsSpeaking(true)
-
-          // Clear any existing silence timer
-          if (silenceTimer.current) {
-            clearTimeout(silenceTimer.current)
-            silenceTimer.current = null
-          }
-        }
-      } else {
-        // User is not speaking
-        consecutiveSpeechFramesRef.current = 0
-        consecutiveSilenceFramesRef.current++
-
-        // Check if we've been silent for a while after speaking
-        if (
-          isSpeaking &&
-          consecutiveSilenceFramesRef.current >= 15 &&
-          !vadProcessingRef.current &&
-          Date.now() - lastSpeechRef.current >= 300
-        ) {
-          // User has been silent for enough frames after speaking
-          vadProcessingRef.current = true
-
-          // Start silence timer for final confirmation
-          if (!silenceTimer.current) {
-            silenceTimer.current = setTimeout(() => {
-              // User has been silent for the threshold period
-              setIsSpeaking(false)
-              vadProcessingRef.current = false
-
-              // Stop recording to process the audio
-              if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-                console.log("VAD detected end of speech, stopping recorder to process audio")
-                stopRecording()
-              }
-            }, silenceDuration.current) // Configurable silence duration before processing
-          }
+      // If we were processing audio and user starts speaking, interrupt
+      if (processingAudio && mediaRecorderRef.current) {
+        setProcessingAudio(false)
+        // Restart recording to capture new speech
+        if (mediaRecorderRef.current.state !== "recording") {
+          mediaRecorderRef.current.start(1000)
+          setIsListening(true)
         }
       }
+    } else if (!userIsSpeaking && isSpeaking && !isMuted) {
+      // User might have stopped speaking - start silence timer
+      if (!silenceTimer) {
+        const timer = setTimeout(() => {
+          // User has been silent for the threshold period
+          setIsSpeaking(false)
 
-      // Continue monitoring
-      animationFrameRef.current = requestAnimationFrame(monitorAudioLevel)
+          // Stop recording to process the audio
+          if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+            mediaRecorderRef.current.stop()
+          }
+        }, 1500) // 1.5 seconds of silence before processing
+
+        setSilenceTimer(timer)
+      }
     }
 
-    // Start the monitoring loop
-    monitorAudioLevel()
-  }
-
-  // Stop recording
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-      mediaRecorderRef.current.stop()
-      setIsListening(false)
-    }
-
-    // Clear any silence timer
-    if (silenceTimer.current) {
-      clearTimeout(silenceTimer.current)
-      silenceTimer.current = null
-    }
+    // Continue monitoring
+    requestAnimationFrame(monitorAudioLevel)
   }
 
   // End call
   const endCall = () => {
-    stopRecording()
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop()
+    }
 
     if (socketRef.current) {
       socketRef.current.close()
     }
 
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current)
-      animationFrameRef.current = null
-    }
-
     setIsCallActive(false)
     setIsListening(false)
-    setIsSpeaking(false)
-    setListeningDuration(0)
   }
 
   // Toggle mute
+  // Replace the toggleMute function with this enhanced version
   const toggleMute = () => {
     setIsMuted(!isMuted)
 
-    if (!isMuted) {
-      // Muting - stop recording
-      stopRecording()
-      setIsSpeaking(false)
+    if (mediaRecorderRef.current) {
+      if (!isMuted) {
+        // Muting - stop recording
+        mediaRecorderRef.current.stop()
+        setIsListening(false)
+        setIsSpeaking(false)
 
-      // Clear any silence timer
-      if (silenceTimer.current) {
-        clearTimeout(silenceTimer.current)
-        silenceTimer.current = null
-      }
-    } else {
-      // Unmuting - start recording again
-      resumeListening()
-    }
-  }
-
-  // Resume listening
-  const resumeListening = () => {
-    if (isCallActive && !isMuted && !isSpeaking && mediaRecorderRef.current) {
-      // Reset VAD state before resuming
-      vadBufferRef.current = []
-      consecutiveSilenceFramesRef.current = 0
-      consecutiveSpeechFramesRef.current = 0
-      vadProcessingRef.current = false
-      lastSpeechRef.current = Date.now()
-
-      if (mediaRecorderRef.current.state !== "recording") {
-        mediaRecorderRef.current.start(1000)
-        setIsListening(true)
+        // Clear any silence timer
+        if (silenceTimer) {
+          clearTimeout(silenceTimer)
+          setSilenceTimer(null)
+        }
+      } else {
+        // Unmuting - start recording again
+        if (mediaRecorderRef.current.state !== "recording") {
+          mediaRecorderRef.current.start(1000)
+          setIsListening(true)
+        }
       }
     }
   }
@@ -553,22 +437,33 @@ const wsUrl =
   }
 
   // Play audio
+  // Replace the playAudio function with this enhanced version
   const playAudio = (audioBlob: Blob) => {
     const url = URL.createObjectURL(audioBlob)
     if (audioElementRef.current) {
       // Stop listening while response is playing
-      stopRecording()
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+        mediaRecorderRef.current.stop()
+        setIsListening(false)
+      }
 
       audioElementRef.current.src = url
       audioElementRef.current.play().catch((error) => {
         console.error("Error playing audio:", error)
         // If playback fails, resume listening
-        setIsSpeaking(false)
         resumeListening()
       })
 
       // Set processing to false once we start playing the response
       setProcessingAudio(false)
+    }
+  }
+
+  // Add this new function to resume listening
+  const resumeListening = () => {
+    if (isCallActive && !isMuted && mediaRecorderRef.current && mediaRecorderRef.current.state !== "recording") {
+      mediaRecorderRef.current.start(1000)
+      setIsListening(true)
     }
   }
 
@@ -586,13 +481,6 @@ const wsUrl =
     }
 
     return null
-  }
-
-  // Format time for display
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins}:${secs < 10 ? "0" : ""}${secs}`
   }
 
   // Handle script type change
@@ -685,7 +573,7 @@ const wsUrl =
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
                       <span className="relative inline-flex rounded-full h-3 w-3 bg-primary"></span>
                     </span>
-                    {isSpeaking ? "Speech detected..." : `Listening... ${formatTime(listeningDuration)}`}
+                    Listening...
                   </div>
                 </div>
               )}
@@ -742,4 +630,3 @@ const wsUrl =
     </div>
   )
 }
-
