@@ -8,40 +8,52 @@ import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/componen
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
-// Add TypeScript declarations for Web Speech API
 declare global {
+  interface SpeechRecognitionConstructor {
+    new(): SpeechRecognition;
+  }
+
   interface Window {
-    SpeechRecognition: any
-    webkitSpeechRecognition: any
+    SpeechRecognition: SpeechRecognitionConstructor;
+    webkitSpeechRecognition: SpeechRecognitionConstructor;
   }
 }
 
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+  message: string;
+}
+
 interface SpeechRecognitionEvent extends Event {
-  results: SpeechRecognitionResultList
-  resultIndex: number
+  results: SpeechRecognitionResultList;
+  resultIndex: number;
 }
 
 interface SpeechRecognitionResultList {
-  length: number
-  item(index: number): SpeechRecognitionResult
-  [index: number]: SpeechRecognitionResult
+  length: number;
+  item(index: number): SpeechRecognitionResult;
+  [index: number]: SpeechRecognitionResult;
 }
 
 interface SpeechRecognitionResult {
-  isFinal: boolean
-  [index: number]: SpeechRecognitionAlternative
+  isFinal: boolean;
+  [index: number]: SpeechRecognitionAlternative;
 }
 
 interface SpeechRecognitionAlternative {
-  transcript: string
+  transcript: string;
 }
 
 interface SpeechRecognition extends EventTarget {
-  continuous: boolean
-  interimResults: boolean
-  start(): void
-  stop(): void
-  onresult: (event: SpeechRecognitionEvent) => void
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  maxAlternatives: number;
+  onerror: (event: SpeechRecognitionErrorEvent) => void;
+  onresult: (event: SpeechRecognitionEvent) => void;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
 }
 
 export default function VoiceAssistant() {
@@ -56,6 +68,7 @@ export default function VoiceAssistant() {
   const [silenceTimer, setSilenceTimer] = useState<NodeJS.Timeout | null>(null)
   const [processingAudio, setProcessingAudio] = useState(false)
   const [transcription, setTranscription] = useState("")
+  const [reconnectAttempts, setReconnectAttempts] = useState(0)
   const lastSpeechRef = useRef<number>(Date.now())
 
   const socketRef = useRef<WebSocket | null>(null)
@@ -64,6 +77,7 @@ export default function VoiceAssistant() {
   const audioChunksRef = useRef<Blob[]>([])
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const recognitionRef = useRef<SpeechRecognition | null>(null)
+  const pingIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
   useEffect(() => {
     if (!process.env.NEXT_PUBLIC_WS_URL) {
@@ -74,61 +88,74 @@ export default function VoiceAssistant() {
   useEffect(() => {
     audioElementRef.current = new Audio()
 
-    if (audioElementRef.current) {
-      audioElementRef.current.onplay = () => {
-        if (isListening && mediaRecorderRef.current) {
-          mediaRecorderRef.current.stop()
-          setIsListening(false)
-        }
-      }
-
-      audioElementRef.current.onended = () => {
-        setIsSpeaking(false) // Reset speaking state when audio ends
-        resumeListening()
+    const audioElement = audioElementRef.current
+    audioElement.onplay = () => {
+      if (isListening && mediaRecorderRef.current) {
+        mediaRecorderRef.current.stop()
+        setIsListening(false)
       }
     }
 
+    audioElement.onended = () => {
+      setIsSpeaking(false)
+      resumeListening()
+    }
+
+    audioElement.onerror = () => {
+      setIsSpeaking(false)
+      resumeListening()
+    }
+
     return () => {
-      if (socketRef.current) {
-        socketRef.current.close()
+      if (audioElement) {
+        audioElement.onplay = null
+        audioElement.onended = null
+        audioElement.onerror = null
       }
-      if (audioContextRef.current) {
-        audioContextRef.current.close()
-      }
-      if (silenceTimer) {
-        clearTimeout(silenceTimer)
-      }
-      if (recognitionRef.current) {
-        recognitionRef.current.stop()
-      }
+      cleanupResources()
     }
   }, [])
 
-  useEffect(() => {
-    if (audioElementRef.current) {
-      audioElementRef.current.onended = () => {
-        setIsSpeaking(false) // Reset speaking state when audio ends
-        resumeListening()
-      }
+  const cleanupResources = () => {
+    if (socketRef.current) {
+      socketRef.current.close()
+      socketRef.current = null
     }
-
-    return () => {
-      if (audioElementRef.current) {
-        audioElementRef.current.onended = null
-      }
+    if (audioContextRef.current) {
+      audioContextRef.current.close()
+      audioContextRef.current = null
     }
-  }, [isCallActive, isMuted])
+    if (silenceTimer) {
+      clearTimeout(silenceTimer)
+    }
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+      recognitionRef.current = null
+    }
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current)
+      pingIntervalRef.current = null
+    }
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stream?.getTracks().forEach(track => track.stop())
+      mediaRecorderRef.current = null
+    }
+  }
 
-  // Add this function to send periodic pings to keep the connection alive
   const setupPingInterval = (socket: WebSocket) => {
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current)
+    }
+
     const pingInterval = setInterval(() => {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "ping" }))
       } else {
         clearInterval(pingInterval)
       }
-    }, 30000) // Send a ping every 30 seconds
+    }, 25000) // Send a ping every 25 seconds
 
+    pingIntervalRef.current = pingInterval
     return pingInterval
   }
 
@@ -139,7 +166,7 @@ export default function VoiceAssistant() {
         ? "wss://purely-prepared-pigeon.ngrok-free.app"
         : "ws://purely-prepared-pigeon.ngrok-free.app")
 
-    console.warn(`⚠️ Warning: Using WebSocket URL: ${wsUrl}`)
+    console.log(`Connecting to WebSocket at: ${wsUrl}`)
 
     try {
       const socket = new WebSocket(wsUrl)
@@ -147,14 +174,9 @@ export default function VoiceAssistant() {
       socket.onopen = () => {
         console.log("WebSocket connected")
         setIsConnected(true)
-
-        // Setup ping interval
-        const pingInterval = setupPingInterval(socket)
-
-        // Clear the interval when the socket closes
-        socket.addEventListener("close", () => {
-          clearInterval(pingInterval)
-        })
+        setReconnectAttempts(0)
+        
+        setupPingInterval(socket)
 
         if (context.trim()) {
           socket.send(
@@ -195,6 +217,8 @@ export default function VoiceAssistant() {
             ])
           } else if (data.type === "info") {
             console.log("Server info:", data.message)
+          } else if (data.type === "pong") {
+            console.log("Received pong from server")
           }
         } catch (error) {
           console.error("Error parsing WebSocket message:", error)
@@ -203,38 +227,40 @@ export default function VoiceAssistant() {
 
       socket.onclose = (event) => {
         console.log(`WebSocket disconnected: ${event.code} ${event.reason}`)
+        setIsConnected(false)
 
-        // Only update connection state if this wasn't a normal closure or if the call is still active
-        if (event.code !== 1000 || isCallActive) {
-          setIsConnected(false)
-
-          // Only end the call if it was an abnormal closure
-          if (event.code !== 1000) {
-            setIsCallActive(false)
-
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content: "Connection lost. Please try starting the call again.",
-              },
-            ])
-          } else if (isCallActive) {
-            // If it was a normal closure but the call is still active, try to reconnect
-            setTimeout(connectWebSocket, 1000)
-          }
+        if (pingIntervalRef.current) {
+          clearInterval(pingIntervalRef.current)
+          pingIntervalRef.current = null
         }
+
+        // Don't attempt to reconnect if the call is not active
+        if (!isCallActive) return
+
+        // Don't attempt to reconnect if this was a normal closure
+        if (event.code === 1000) return
+
+        // Exponential backoff for reconnection
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
+        console.log(`Attempting to reconnect in ${delay}ms...`)
+
+        setTimeout(() => {
+          if (isCallActive) {
+            setReconnectAttempts(prev => prev + 1)
+            connectWebSocket()
+          }
+        }, delay)
       }
 
       socket.onerror = (error) => {
         console.error("WebSocket error:", error)
         setIsConnected(false)
-
+        
         setMessages((prev) => [
           ...prev,
           {
             role: "assistant",
-            content: "Failed to connect to the voice service. Please check if the server is running and try again.",
+            content: "Connection error. Attempting to reconnect...",
           },
         ])
       }
@@ -273,7 +299,11 @@ export default function VoiceAssistant() {
     try {
       setMessages([])
       connectWebSocket()
-      audioContextRef.current = new AudioContext()
+      
+      // Initialize audio context only if not already created
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext()
+      }
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const mediaRecorder = new MediaRecorder(stream)
@@ -300,12 +330,17 @@ export default function VoiceAssistant() {
               setProcessingAudio(true)
               const base64Audio = await blobToBase64(audioBlob)
 
-              socketRef.current.send(
-                JSON.stringify({
-                  type: "audio",
-                  data: base64Audio,
-                }),
-              )
+              if (socketRef.current.readyState === WebSocket.OPEN) {
+                socketRef.current.send(
+                  JSON.stringify({
+                    type: "audio",
+                    data: base64Audio,
+                  }),
+                )
+              } else {
+                console.error("WebSocket not open, cannot send audio")
+                setProcessingAudio(false)
+              }
             }
           } catch (error) {
             console.error("Error sending audio:", error)
@@ -358,8 +393,23 @@ export default function VoiceAssistant() {
           setSilenceTimer(timer)
         }
 
+        recognitionRef.current.onerror = (event) => {
+          console.error("Speech recognition error:", event)
+          // Attempt to restart recognition
+          setTimeout(() => {
+            if (recognitionRef.current && isCallActive && !isMuted) {
+              try {
+                recognitionRef.current.start()
+              } catch (e) {
+                console.error("Failed to restart speech recognition:", e)
+              }
+            }
+          }, 500)
+        }
+
         recognitionRef.current.start()
       }
+      
       mediaRecorder.start(1000)
       setIsCallActive(true)
       setIsListening(true)
@@ -376,80 +426,12 @@ export default function VoiceAssistant() {
     }
   }
 
-  const monitorAudioLevel = () => {
-    if (!mediaRecorderRef.current || !isCallActive) return
-
-    const setupVoiceActivityDetection = () => {
-      const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition
-      if (!SpeechRecognitionAPI) {
-        console.error("Speech recognition not supported")
-        return
-      }
-
-      if (!recognitionRef.current) {
-        recognitionRef.current = new SpeechRecognitionAPI()
-        if (recognitionRef.current) {
-          recognitionRef.current.continuous = true
-          recognitionRef.current.interimResults = true
-        }
-      }
-
-      if (recognitionRef.current) {
-        recognitionRef.current.onresult = (event: SpeechRecognitionEvent) => {
-          if (isMuted || isSpeaking) return
-
-          lastSpeechRef.current = Date.now()
-
-          let finalTranscript = ""
-          let interimTranscript = ""
-
-          for (let i = event.resultIndex; i < event.results.length; ++i) {
-            if (event.results[i].isFinal) {
-              finalTranscript += event.results[i][0].transcript
-            } else {
-              interimTranscript += event.results[i][0].transcript
-            }
-          }
-
-          const transcript = finalTranscript || interimTranscript
-          setTranscription(transcript)
-
-          if (silenceTimer) {
-            clearTimeout(silenceTimer)
-          }
-
-          const timer = setTimeout(() => {
-            if (transcript.trim() && Date.now() - lastSpeechRef.current >= 1500 && !isMuted && !isSpeaking) {
-              stopRecognition()
-              processAudio()
-            }
-          }, 1500)
-
-          setSilenceTimer(timer)
-        }
-
-        recognitionRef.current.start()
-      }
-    }
-
-    setupVoiceActivityDetection()
-  }
-
   const endCall = () => {
-    if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.stop()
-    }
-
-    if (socketRef.current) {
-      socketRef.current.close()
-    }
-
-    if (recognitionRef.current) {
-      recognitionRef.current.stop()
-    }
-
+    cleanupResources()
     setIsCallActive(false)
     setIsListening(false)
+    setIsConnected(false)
+    setReconnectAttempts(0)
   }
 
   const toggleMute = () => {
@@ -514,11 +496,11 @@ export default function VoiceAssistant() {
         setIsListening(false)
       }
 
-      setIsSpeaking(true) // Set speaking state to true when playing audio
+      setIsSpeaking(true)
       audioElementRef.current.src = url
       audioElementRef.current.play().catch((error) => {
         console.error("Error playing audio:", error)
-        setIsSpeaking(false) // Reset speaking state on error
+        setIsSpeaking(false)
         resumeListening()
       })
 
@@ -564,7 +546,7 @@ export default function VoiceAssistant() {
       return (
         <div className="flex justify-center my-2">
           <div className="bg-destructive text-destructive-foreground px-3 py-1 rounded-md text-sm">
-            Disconnected from server
+            Disconnected from server - attempting to reconnect...
           </div>
         </div>
       )
@@ -718,4 +700,3 @@ export default function VoiceAssistant() {
     </div>
   )
 }
-
