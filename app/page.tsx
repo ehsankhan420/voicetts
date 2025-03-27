@@ -24,6 +24,12 @@ export default function VoiceAssistant() {
   const audioAnalyserRef = useRef<AnalyserNode | null>(null)
   const audioStreamRef = useRef<MediaStream | null>(null)
 
+  // VAD related refs
+  const vadBufferRef = useRef<number[]>([])
+  const consecutiveSilenceFramesRef = useRef(0)
+  const consecutiveSpeechFramesRef = useRef(0)
+  const vadProcessingRef = useRef(false)
+
   const socketRef = useRef<WebSocket | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -112,8 +118,8 @@ const wsUrl =
       ? "wss://purely-prepared-pigeon.ngrok-free.app"
       : "ws://purely-prepared-pigeon.ngrok-free.app");
 
-  console.warn(`⚠️ Warning: Using WebSocket URL: ${wsUrl}`);
 
+    console.warn(`⚠️ Warning: Using WebSocket URL: ${wsUrl}`)
 
     try {
       const socket = new WebSocket(wsUrl)
@@ -217,7 +223,6 @@ const wsUrl =
   }
 
   // Start call
-  // Replace the startCall function with this enhanced version
   const startCall = async () => {
     try {
       // Clear previous messages
@@ -236,11 +241,18 @@ const wsUrl =
       // Set up audio analysis for silence detection
       if (audioContextRef.current) {
         const analyser = audioContextRef.current.createAnalyser()
-        analyser.fftSize = 256
+        analyser.fftSize = 1024 // Increased for better frequency resolution
+        analyser.smoothingTimeConstant = 0.5 // Add smoothing for more stable readings
         audioAnalyserRef.current = analyser
 
         const source = audioContextRef.current.createMediaStreamSource(stream)
         source.connect(analyser)
+
+        // Reset VAD state
+        vadBufferRef.current = []
+        consecutiveSilenceFramesRef.current = 0
+        consecutiveSpeechFramesRef.current = 0
+        vadProcessingRef.current = false
 
         // Start monitoring audio levels
         monitorAudioLevel()
@@ -307,7 +319,7 @@ const wsUrl =
     }
   }
 
-  // Add this new function for monitoring audio levels
+  // Enhanced VAD monitoring function
   const monitorAudioLevel = () => {
     if (!audioAnalyserRef.current || !isCallActive) return
 
@@ -317,42 +329,74 @@ const wsUrl =
     // Calculate average volume level
     const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length / 255
 
-    // Detect if user is speaking
-    const userIsSpeaking = average > silenceThreshold.current
+    // Add to VAD buffer (keep last 10 frames for analysis)
+    vadBufferRef.current.push(average)
+    if (vadBufferRef.current.length > 10) {
+      vadBufferRef.current.shift()
+    }
 
-    if (userIsSpeaking && !isSpeaking && !isMuted) {
-      // User started speaking
-      setIsSpeaking(true)
+    // Calculate moving average for more stable detection
+    const movingAverage = vadBufferRef.current.reduce((sum, value) => sum + value, 0) / vadBufferRef.current.length
 
-      // Clear any existing silence timer
-      if (silenceTimer) {
-        clearTimeout(silenceTimer)
-        setSilenceTimer(null)
-      }
+    // Dynamic threshold adjustment based on background noise
+    const dynamicThreshold = Math.max(
+      silenceThreshold.current,
+      vadBufferRef.current.length >= 5 ? Math.min(...vadBufferRef.current.slice(0, 5)) * 2 : silenceThreshold.current,
+    )
 
-      // If we were processing audio and user starts speaking, interrupt
-      if (processingAudio && mediaRecorderRef.current) {
-        setProcessingAudio(false)
-        // Restart recording to capture new speech
-        if (mediaRecorderRef.current.state !== "recording") {
-          mediaRecorderRef.current.start(1000)
-          setIsListening(true)
+    // Detect if user is speaking using the moving average
+    const userIsSpeaking = movingAverage > dynamicThreshold
+
+    if (userIsSpeaking && !isMuted) {
+      // User is speaking
+      consecutiveSilenceFramesRef.current = 0
+      consecutiveSpeechFramesRef.current++
+
+      if (consecutiveSpeechFramesRef.current >= 3 && !isSpeaking) {
+        // User started speaking (with 3 frames confirmation to avoid false positives)
+        setIsSpeaking(true)
+
+        // Clear any existing silence timer
+        if (silenceTimer) {
+          clearTimeout(silenceTimer)
+          setSilenceTimer(null)
+        }
+
+        // If we were processing audio and user starts speaking, interrupt
+        if (processingAudio && mediaRecorderRef.current) {
+          setProcessingAudio(false)
+          // Restart recording to capture new speech
+          if (mediaRecorderRef.current.state !== "recording") {
+            mediaRecorderRef.current.start(1000)
+            setIsListening(true)
+          }
         }
       }
-    } else if (!userIsSpeaking && isSpeaking && !isMuted) {
-      // User might have stopped speaking - start silence timer
-      if (!silenceTimer) {
-        const timer = setTimeout(() => {
-          // User has been silent for the threshold period
-          setIsSpeaking(false)
+    } else if (!isMuted) {
+      // User is not speaking
+      consecutiveSpeechFramesRef.current = 0
+      consecutiveSilenceFramesRef.current++
 
-          // Stop recording to process the audio
-          if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-            mediaRecorderRef.current.stop()
-          }
-        }, 1500) // 1.5 seconds of silence before processing
+      if (consecutiveSilenceFramesRef.current >= 15 && isSpeaking && !vadProcessingRef.current) {
+        // User has been silent for 15 frames (about 300-450ms depending on frame rate)
+        vadProcessingRef.current = true
 
-        setSilenceTimer(timer)
+        // Start silence timer for final confirmation
+        if (!silenceTimer) {
+          const timer = setTimeout(() => {
+            // User has been silent for the threshold period
+            setIsSpeaking(false)
+            vadProcessingRef.current = false
+
+            // Stop recording to process the audio
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+              console.log("VAD detected end of speech, stopping recorder to process audio")
+              mediaRecorderRef.current.stop()
+            }
+          }, 1000) // 1 second of silence before processing
+
+          setSilenceTimer(timer)
+        }
       }
     }
 
@@ -375,7 +419,6 @@ const wsUrl =
   }
 
   // Toggle mute
-  // Replace the toggleMute function with this enhanced version
   const toggleMute = () => {
     setIsMuted(!isMuted)
 
@@ -437,7 +480,6 @@ const wsUrl =
   }
 
   // Play audio
-  // Replace the playAudio function with this enhanced version
   const playAudio = (audioBlob: Blob) => {
     const url = URL.createObjectURL(audioBlob)
     if (audioElementRef.current) {
@@ -459,9 +501,15 @@ const wsUrl =
     }
   }
 
-  // Add this new function to resume listening
+  // Resume listening
   const resumeListening = () => {
     if (isCallActive && !isMuted && mediaRecorderRef.current && mediaRecorderRef.current.state !== "recording") {
+      // Reset VAD state before resuming
+      vadBufferRef.current = []
+      consecutiveSilenceFramesRef.current = 0
+      consecutiveSpeechFramesRef.current = 0
+      vadProcessingRef.current = false
+
       mediaRecorderRef.current.start(1000)
       setIsListening(true)
     }
@@ -573,7 +621,7 @@ const wsUrl =
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
                       <span className="relative inline-flex rounded-full h-3 w-3 bg-primary"></span>
                     </span>
-                    Listening...
+                    {isSpeaking ? "Listening (Speech detected)" : "Listening..."}
                   </div>
                 </div>
               )}
@@ -630,3 +678,4 @@ const wsUrl =
     </div>
   )
 }
+
