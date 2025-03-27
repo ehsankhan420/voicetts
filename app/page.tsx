@@ -10,51 +10,51 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 
 declare global {
   interface SpeechRecognitionConstructor {
-    new(): SpeechRecognition;
+    new (): SpeechRecognition
   }
 
   interface Window {
-    SpeechRecognition: SpeechRecognitionConstructor;
-    webkitSpeechRecognition: SpeechRecognitionConstructor;
+    SpeechRecognition: SpeechRecognitionConstructor
+    webkitSpeechRecognition: SpeechRecognitionConstructor
   }
 }
 
 interface SpeechRecognitionErrorEvent extends Event {
-  error: string;
-  message: string;
+  error: string
+  message: string
 }
 
 interface SpeechRecognitionEvent extends Event {
-  results: SpeechRecognitionResultList;
-  resultIndex: number;
+  results: SpeechRecognitionResultList
+  resultIndex: number
 }
 
 interface SpeechRecognitionResultList {
-  length: number;
-  item(index: number): SpeechRecognitionResult;
-  [index: number]: SpeechRecognitionResult;
+  length: number
+  item(index: number): SpeechRecognitionResult
+  [index: number]: SpeechRecognitionResult
 }
 
 interface SpeechRecognitionResult {
-  isFinal: boolean;
-  [index: number]: SpeechRecognitionAlternative;
+  isFinal: boolean
+  [index: number]: SpeechRecognitionAlternative
 }
 
 interface SpeechRecognitionAlternative {
-  transcript: string;
+  transcript: string
 }
 
 interface SpeechRecognition extends EventTarget {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  maxAlternatives: number;
-  onerror: (event: SpeechRecognitionErrorEvent) => void;
-  onresult: (event: SpeechRecognitionEvent) => void;
-  onend: () => void;
-  start: () => void;
-  stop: () => void;
-  abort: () => void;
+  continuous: boolean
+  interimResults: boolean
+  lang: string
+  maxAlternatives: number
+  onerror: (event: SpeechRecognitionErrorEvent) => void
+  onresult: (event: SpeechRecognitionEvent) => void
+  onend: () => void
+  start: () => void
+  stop: () => void
+  abort: () => void
 }
 
 export default function VoiceAssistant() {
@@ -138,7 +138,7 @@ export default function VoiceAssistant() {
       pingIntervalRef.current = null
     }
     if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.stream?.getTracks().forEach(track => track.stop())
+      mediaRecorderRef.current.stream?.getTracks().forEach((track) => track.stop())
       mediaRecorderRef.current = null
     }
   }
@@ -176,7 +176,7 @@ export default function VoiceAssistant() {
         console.log("WebSocket connected")
         setIsConnected(true)
         setReconnectAttempts(0)
-        
+
         setupPingInterval(socket)
 
         if (context.trim()) {
@@ -247,7 +247,7 @@ export default function VoiceAssistant() {
 
         setTimeout(() => {
           if (isCallActive) {
-            setReconnectAttempts(prev => prev + 1)
+            setReconnectAttempts((prev) => prev + 1)
             connectWebSocket()
           }
         }, delay)
@@ -256,7 +256,7 @@ export default function VoiceAssistant() {
       socket.onerror = (error) => {
         console.error("WebSocket error:", error)
         setIsConnected(false)
-        
+
         setMessages((prev) => [
           ...prev,
           {
@@ -300,7 +300,7 @@ export default function VoiceAssistant() {
     try {
       setMessages([])
       connectWebSocket()
-      
+
       // Initialize audio context only if not already created
       if (!audioContextRef.current) {
         audioContextRef.current = new AudioContext()
@@ -428,7 +428,7 @@ export default function VoiceAssistant() {
 
         recognitionRef.current.start()
       }
-      
+
       mediaRecorder.start(1000)
       setIsCallActive(true)
       setIsListening(true)
@@ -719,3 +719,4 @@ export default function VoiceAssistant() {
     </div>
   )
 }
+
