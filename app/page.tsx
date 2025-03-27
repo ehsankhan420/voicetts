@@ -1,9 +1,7 @@
-
-
 "use client"
 
 import { useState, useRef, useEffect } from "react"
-import { Phone, PhoneOff, Mic, MicOff } from "lucide-react"
+import { Phone, PhoneOff, Mic, MicOff } from 'lucide-react'
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
@@ -17,7 +15,7 @@ export default function VoiceAssistant() {
   const [messages, setMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([])
   const [isConnected, setIsConnected] = useState(false)
   const [isListening, setIsListening] = useState(false)
-  const [scriptType, setScriptType] = useState("reliant_bpo")
+  const [scriptType, setScriptType] = useState("freight_flow")
   // Add these new state variables after the existing state declarations
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [silenceTimer, setSilenceTimer] = useState<NodeJS.Timeout | null>(null)
@@ -513,16 +511,14 @@ const wsUrl =
             <div className="space-y-4">
               <div className="space-y-2">
                 <label htmlFor="script-type" className="text-sm font-medium">
-                  BPO Script Type
+                  Script Type
                 </label>
                 <Select value={scriptType} onValueChange={handleScriptTypeChange}>
                   <SelectTrigger id="script-type">
                     <SelectValue placeholder="Select script type" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="reliant_bpo">Reliant BPO</SelectItem>
-                    <SelectItem value="21st_bpo">21st BPO</SelectItem>
-                    <SelectItem value="sirus_solutions">Sirus Solutions</SelectItem>
+                    <SelectItem value="freight_flow">FreightFlow Dispatch</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
