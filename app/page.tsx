@@ -105,15 +105,10 @@ export default function VoiceAssistant() {
 
   // Connect to WebSocket server
   const connectWebSocket = () => {
-    // Use environment variable or fallback to localhost
-const wsUrl =
-    process.env.NEXT_PUBLIC_WS_URL ||
-    (window.location.protocol === "https:"
-      ? "wss://early-guiding-feline.ngrok-free.app"
-      : "ws://early-guiding-feline.ngrok-free.app");
+    // Use environment variable or fallback to ngrok URL
+    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "wss://early-guiding-feline.ngrok-free.app"
 
-  console.warn(`⚠️ Warning: Using WebSocket URL: ${wsUrl}`);
-
+    console.warn(`⚠️ Warning: Using WebSocket URL: ${wsUrl}`);
 
     try {
       const socket = new WebSocket(wsUrl)
